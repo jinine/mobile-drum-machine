@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:just_audio/just_audio.dart';
@@ -12,7 +14,10 @@ class HomeScreen extends StatefulWidget {
 
 class _PadData {
   String? filePath;
-  final AudioPlayer player = AudioPlayer();
+  final AudioPlayer player;
+  bool isAsset;
+
+  _PadData({this.filePath, required this.player, this.isAsset = false});
 
   void dispose() {
     player.dispose();
@@ -20,7 +25,8 @@ class _PadData {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final List<_PadData> _pads = List.generate(9, (_) => _PadData());
+  final List<_PadData> _pads =
+      List.generate(9, (_) => _PadData(player: AudioPlayer()));
   int? _editingPadIndex;
 
   @override
@@ -37,17 +43,47 @@ class _HomeScreenState extends State<HomeScreen> {
       allowedExtensions: ['wav', 'mp3'],
     );
     if (result != null && result.files.single.path != null) {
+      await _loadAudioForPad(padIndex, result.files.single.path!);
+    }
+  }
+
+  Future<void> _loadAudioForPad(int padIndex, String path,
+      {bool isAsset = false}) async {
+    final pad = _pads[padIndex];
+    // Dispose the old player to release resources before creating a new one
+    await pad.player.dispose();
+
+    // Create a new player configured for low-latency playback
+    final newPlayer = AudioPlayer();
+
+    try {
+      AudioSource source;
+      if (isAsset) {
+        source = AudioSource.asset(path);
+      } else {
+        source = AudioSource.file(path);
+      }
+
+      // Pre-load the audio data. This is crucial for low-latency playback.
+      // The duration returned here can be useful, but we don't need it for now.
+      await newPlayer.setAudioSource(source, preload: true);
+
       setState(() {
-        _pads[padIndex].filePath = result.files.single.path;
+        // Replace the old pad data with new data including the new player
+        _pads[padIndex] =
+            _PadData(player: newPlayer, filePath: path, isAsset: isAsset);
       });
-      await _pads[padIndex].player.setFilePath(_pads[padIndex].filePath!);
+    } catch (e) {
+      // Handle potential errors during loading
+      print("Error loading audio source: $e");
+      // You might want to show a dialog to the user here
     }
   }
 
   void _showPadOptions(int padIndex) async {
     final pad = _pads[padIndex];
     if (pad.filePath == null) {
-      await _pickFileForPad(padIndex);
+      _showLoadSampleDialog(padIndex);
       return;
     }
     final result = await showDialog<String>(
@@ -86,10 +122,75 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _playPad(int padIndex) {
+  Future<void> _showLoadSampleDialog(int padIndex) async {
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Load Sample'),
+        content: const Text('Choose a source for your audio sample.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'device'),
+            child: const Text('From Device'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'preloaded'),
+            child: const Text('Preloaded'),
+          ),
+        ],
+      ),
+    );
+
+    if (result == 'device') {
+      await _pickFileForPad(padIndex);
+    } else if (result == 'preloaded') {
+      _showPreloadedSamples(padIndex);
+    }
+  }
+
+  Future<void> _showPreloadedSamples(int padIndex) async {
+    final manifestContent = await rootBundle.loadString('AssetManifest.json');
+    final Map<String, dynamic> manifestMap = json.decode(manifestContent);
+    final samplePaths = manifestMap.keys
+        .where((String key) => key.startsWith('assets/samples/'))
+        .toList();
+
+    final selectedSample = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Choose a Sample'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: samplePaths.length,
+            itemBuilder: (context, index) {
+              final sampleName = samplePaths[index].split('/').last;
+              return ListTile(
+                title: Text(sampleName),
+                onTap: () => Navigator.pop(context, samplePaths[index]),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    if (selectedSample != null) {
+      await _loadAudioForPad(padIndex, selectedSample, isAsset: true);
+    }
+  }
+
+  void _playPad(int padIndex) async {
     final pad = _pads[padIndex];
     if (pad.filePath != null) {
-      pad.player.seek(Duration.zero);
+      // If the player is already playing, stop it first to cut the sound off,
+      // which is common for drum pads.
+      if (pad.player.playing) {
+        await pad.player.stop();
+      }
+      // Seek to the beginning and play.
+      await pad.player.seek(Duration.zero);
       pad.player.play();
     }
   }

@@ -2,15 +2,35 @@
 
 drum machine
 
-## Getting Started
+![1](https://github.com/jinine/mobile-drum-machine/blob/main/Screenshot_20250624_032120.png)
 
-This project is a starting point for a Flutter application.
+
+## ✨ Features
 
 A few resources to get you started if this is your first Flutter project:
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+---
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## 🔧 Architecture
+
+- **Flutter**: UI, state management, gesture handling, platform coordination
+- **Native Audio (via FFI)**:
+    - **Playback**: `just_audio` or native audio engines
+    - **Effects & DSP**: C++ audio libraries (e.g. [RubberBand](https://breakfastquay.com/rubberband/), [SoundTouch](https://www.surina.net/soundtouch/))
+    - **Audio routing**: AVAudioEngine / AudioTrack
+
+---
+
+## 📁 Project Structure
+
+```plaintext
+/lib
+  ├── main.dart
+  ├── screens/
+  ├── widgets/
+  ├── models/
+  └── services/
+    
+/assets
+  └── samples/
+```
