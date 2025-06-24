@@ -24,10 +24,21 @@ class _PadData {
   }
 }
 
+class _PadEditParams {
+  double start = 0.0;
+  double end = 1.0; // 1.0 means 100% of the sample
+  bool reverse = false;
+  double speed = 1.0;
+  double fadeIn = 0.0;
+  double fadeOut = 0.0;
+  bool loop = false;
+}
+
 class _HomeScreenState extends State<HomeScreen> {
   final List<_PadData> _pads =
       List.generate(9, (_) => _PadData(player: AudioPlayer()));
   int? _editingPadIndex;
+  Map<int, _PadEditParams> _editParams = {};
 
   @override
   void dispose() {
@@ -110,6 +121,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (result == 'edit') {
       setState(() {
         _editingPadIndex = padIndex;
+        _editParams.putIfAbsent(padIndex, () => _PadEditParams());
       });
     } else if (result == 'delete') {
       setState(() {
@@ -184,14 +196,77 @@ class _HomeScreenState extends State<HomeScreen> {
   void _playPad(int padIndex) async {
     final pad = _pads[padIndex];
     if (pad.filePath != null) {
-      // If the player is already playing, stop it first to cut the sound off,
-      // which is common for drum pads.
+      final params = _editParams[padIndex];
+
+      // If pad is currently looping, tapping it again will stop it.
+      if (pad.player.playing && pad.player.loopMode == LoopMode.one) {
+        await pad.player.stop();
+        return;
+      }
+
       if (pad.player.playing) {
         await pad.player.stop();
       }
-      // Seek to the beginning and play.
-      await pad.player.seek(Duration.zero);
+
+      // Apply loop mode
+      if (params != null) {
+        await pad.player.setLoopMode(params.loop ? LoopMode.one : LoopMode.off);
+      } else {
+        await pad.player.setLoopMode(LoopMode.off);
+      }
+
+      // Apply speed (pitch/time-stretch)
+      if (params != null) {
+        await pad.player.setSpeed(params.speed);
+      } else {
+        await pad.player.setSpeed(1.0);
+      }
+      // Apply trim (start/end)
+      Duration? duration = pad.player.duration;
+      Duration start = Duration.zero;
+      Duration? end;
+      if (params != null && duration != null) {
+        start = duration * params.start;
+        end = duration * params.end;
+        // Set the clip for the player
+        await pad.player.setClip(start: start, end: end);
+      } else {
+        // Clear any previous clipping
+        await pad.player.setClip();
+      }
+
+      await pad.player.seek(start);
       pad.player.play();
+
+      // Handle fade in/out (approximate, not sample-accurate)
+      // TODO: Re-implement fade logic correctly. The 'duration' parameter for setVolume was incorrect and caused build errors.
+      /*
+      if (params != null && (params.fadeIn > 0.0 || params.fadeOut > 0.0)) {
+        // Reset volume to 1.0 before applying fades
+        pad.player.setVolume(1.0);
+        
+        if (params.fadeIn > 0.0) {
+          pad.player.setVolume(0.0);
+          pad.player.setVolume(1.0,
+              duration: Duration(milliseconds: (params.fadeIn * 1000).toInt()));
+        }
+
+        // Fade out is complex with loops. This logic is best for non-looping sounds.
+        if (params.fadeOut > 0.0 && end != null && !params.loop) {
+          final fadeOutDuration = Duration(milliseconds: (params.fadeOut * 1000).toInt());
+          final playbackDuration = end - start;
+
+          if (playbackDuration > fadeOutDuration) {
+            Future.delayed(playbackDuration - fadeOutDuration, () {
+              if (pad.player.playing) {
+                pad.player.setVolume(1.0); // Ensure volume is 1 before starting fade
+                pad.player.setVolume(0.0, duration: fadeOutDuration);
+              }
+            });
+          }
+        }
+      }
+      */
     }
   }
 
@@ -318,12 +393,123 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 8),
                     WaveformDisplay(filePath: _pads[_editingPadIndex!].filePath),
+                    const SizedBox(height: 16),
+                    _buildEditingControls(_editingPadIndex!),
                   ],
                 ),
               ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildEditingControls(int padIndex) {
+    final params = _editParams[padIndex]!;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text('Trim:', style: TextStyle(color: Colors.white70)),
+            Expanded(
+              child: RangeSlider(
+                values: RangeValues(params.start, params.end),
+                min: 0.0,
+                max: 1.0,
+                divisions: 100,
+                labels: RangeLabels(
+                  (params.start * 100).toStringAsFixed(0) + '%',
+                  (params.end * 100).toStringAsFixed(0) + '%',
+                ),
+                onChanged: (values) {
+                  setState(() {
+                    params.start = values.start;
+                    params.end = values.end;
+                  });
+                },
+              ),
+            ),
+          ],
+        ),
+        Row(
+          children: [
+            const Text('Reverse:', style: TextStyle(color: Colors.white70)),
+            Switch(
+              value: params.reverse,
+              onChanged: (val) {
+                setState(() {
+                  params.reverse = val;
+                });
+              },
+            ),
+            const SizedBox(width: 16),
+            const Text('Loop:', style: TextStyle(color: Colors.white70)),
+            Switch(
+              value: params.loop,
+              onChanged: (val) {
+                setState(() {
+                  params.loop = val;
+                });
+              },
+            ),
+          ],
+        ),
+        Row(
+          children: [
+            const Text('Speed:', style: TextStyle(color: Colors.white70)),
+            Expanded(
+              child: Slider(
+                value: params.speed,
+                min: 0.5,
+                max: 2.0,
+                divisions: 15,
+                label: params.speed.toStringAsFixed(2) + 'x',
+                onChanged: (val) {
+                  setState(() {
+                    params.speed = val;
+                  });
+                },
+              ),
+            ),
+          ],
+        ),
+        Row(
+          children: [
+            const Text('Fade In:', style: TextStyle(color: Colors.white70)),
+            Expanded(
+              child: Slider(
+                value: params.fadeIn,
+                min: 0.0,
+                max: 2.0,
+                divisions: 20,
+                label: params.fadeIn.toStringAsFixed(2) + 's',
+                onChanged: (val) {
+                  setState(() {
+                    params.fadeIn = val;
+                  });
+                },
+              ),
+            ),
+            const SizedBox(width: 16),
+            const Text('Fade Out:', style: TextStyle(color: Colors.white70)),
+            Expanded(
+              child: Slider(
+                value: params.fadeOut,
+                min: 0.0,
+                max: 2.0,
+                divisions: 20,
+                label: params.fadeOut.toStringAsFixed(2) + 's',
+                onChanged: (val) {
+                  setState(() {
+                    params.fadeOut = val;
+                  });
+                },
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 } 
