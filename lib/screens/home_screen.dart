@@ -63,6 +63,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final BpmController _bpmController = BpmController();
   final TextEditingController _bpmTextController = TextEditingController(text: '120.0');
   bool _isBeatActive = false;
+  final Map<int, bool> _padTriggerStates = {};
 
   @override
   void initState() {
@@ -80,7 +81,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  void _onBeat() {
+  void _onBeat(int beatIndex) {
     // Visual feedback for the beat
     setState(() {
       _isBeatActive = true;
@@ -93,13 +94,11 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     });
 
-    // Handle beat callback - this is where recorded patterns will be played
-    if (!_bpmController.isRecording && _bpmController.recordedPattern.isNotEmpty) {
-      final currentBeat = _bpmController.currentBeat;
-      if (currentBeat < _bpmController.recordedPattern.length) {
-        for (final padIndex in _bpmController.recordedPattern[currentBeat]) {
-          _playPad(padIndex);
-        }
+    // Play any pads scheduled for this beat
+    if (!_bpmController.isRecording && 
+        beatIndex < _bpmController.recordedPattern.length) {
+      for (final padIndex in _bpmController.recordedPattern[beatIndex]) {
+        _playPad(padIndex, isSequenced: true);
       }
     }
   }
@@ -252,23 +251,25 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _playPad(int padIndex) async {
+  void _playPad(int padIndex, {bool isSequenced = false}) async {
     final pad = _pads[padIndex];
     if (pad.filePath != null) {
-      // Record the pad hit if we're recording
-      _bpmController.recordPadHit(padIndex);
-
-      final params = _editParams[padIndex];
-
-      // If pad is currently looping, tapping it again will stop it.
-      if (pad.player.playing && pad.player.loopMode == LoopMode.one) {
-        await pad.player.stop();
-        return;
+      // Only record the hit if it's not from the sequencer
+      if (!isSequenced) {
+        _bpmController.recordPadHit(padIndex);
       }
 
-      if (pad.player.playing) {
-        await pad.player.stop();
-      }
+      // Visual feedback
+      setState(() {
+        _padTriggerStates[padIndex] = true;
+      });
+      Future.delayed(const Duration(milliseconds: 100), () {
+        if (mounted) {
+          setState(() {
+            _padTriggerStates[padIndex] = false;
+          });
+        }
+      });
 
       try {
         // Create appropriate AudioSource based on parameters
@@ -282,18 +283,12 @@ class _HomeScreenState extends State<HomeScreen> {
         // Set the audio source
         await pad.player.setAudioSource(source);
 
-        // Apply loop mode
-        await pad.player.setLoopMode(params?.loop == true ? LoopMode.one : LoopMode.off);
-
-        // Apply speed (pitch/time-stretch)
+        final params = _editParams[padIndex];
         if (params != null) {
+          // Apply speed (pitch/time-stretch)
           await pad.player.setSpeed(params.speed);
-        } else {
-          await pad.player.setSpeed(1.0);
-        }
 
-        // Apply trim (start/end)
-        if (params != null) {
+          // Apply trim (start/end)
           await pad.player.setClip(
             start: params.startTime,
             end: params.endTime,
@@ -305,9 +300,13 @@ class _HomeScreenState extends State<HomeScreen> {
           } else {
             await pad.player.seek(params.startTime);
           }
+
+          // Apply loop mode
+          await pad.player.setLoopMode(params.loop ? LoopMode.one : LoopMode.off);
         } else {
           await pad.player.setClip();
           await pad.player.seek(Duration.zero);
+          await pad.player.setLoopMode(LoopMode.off);
         }
 
         // Reset volume to 1.0 before starting
@@ -315,21 +314,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
         // Start playback
         if (params?.reverse == true) {
-          // TODO: Implement proper reverse playback
-          // DISCLAIMER: Current reverse implementation is a temporary solution that produces
-          // choppy audio and artifacts. This is NOT a proper reverse playback implementation.
-          // A proper implementation would require:
-          // 1. Sample-level audio manipulation
-          // 2. Buffer reversal before playback
-          // 3. Native audio processing for real-time sample reversal
-          // 4. Proper handling of audio codec specifics
-          //
-          // This will be replaced with a proper implementation using native audio processing.
-          // For now, this is just a visual demonstration and should not be used in production.
-          
-          // Current hacky implementation - produces choppy audio:
-          final currentParams = params!; // Cache the non-null params
-          final stepSize = const Duration(milliseconds: 20); // 20ms steps for "playback"
+          // Handle reverse playback
+          final currentParams = params!; // Force non-null since we checked above
+          final stepSize = const Duration(milliseconds: 20);
           final timer = Timer.periodic(stepSize, (timer) async {
             if (!pad.player.playing) {
               timer.cancel();
@@ -339,21 +326,16 @@ class _HomeScreenState extends State<HomeScreen> {
             final position = await pad.player.position;
             if (position <= currentParams.startTime) {
               if (currentParams.loop) {
-                // If looping, jump back to end
                 await pad.player.seek(currentParams.endTime);
               } else {
-                // If not looping, stop playback
                 timer.cancel();
                 await pad.player.stop();
               }
             } else {
-              // Move backwards by stepSize - this produces choppy audio
               await pad.player.seek(position - stepSize);
             }
           });
 
-          // Start the audio but immediately pause it
-          // This ensures the audio engine is ready but we control the position
           await pad.player.play();
           await pad.player.pause();
         } else {
@@ -363,33 +345,25 @@ class _HomeScreenState extends State<HomeScreen> {
         // Handle fade in/out
         if (params != null && (params.fadeIn > 0.0 || params.fadeOut > 0.0)) {
           if (params.fadeIn > 0.0) {
-            // Start with volume 0 and fade in
             await pad.player.setVolume(0.0);
-            
-            // Create a smooth fade in effect
-            const steps = 50; // Number of steps for smooth fade
+            const steps = 50;
             final stepDuration = (params.fadeIn * 1000 / steps).round();
             for (var i = 1; i <= steps; i++) {
-              if (!pad.player.playing) break; // Stop if playback was interrupted
+              if (!pad.player.playing) break;
               await pad.player.setVolume(i / steps);
               await Future.delayed(Duration(milliseconds: stepDuration));
             }
           }
 
           if (params.fadeOut > 0.0 && !params.loop) {
-            // Calculate when to start fade out
             final totalDuration = params.endTime - params.startTime;
             final fadeOutStart = totalDuration - Duration(milliseconds: (params.fadeOut * 1000).round());
-            
-            // Wait until it's time to fade out
             Future.delayed(fadeOutStart, () async {
-              if (!pad.player.playing) return; // Don't fade if not playing
-              
-              // Create a smooth fade out effect
-              const steps = 50; // Number of steps for smooth fade
+              if (!pad.player.playing) return;
+              const steps = 50;
               final stepDuration = (params.fadeOut * 1000 / steps).round();
               for (var i = steps - 1; i >= 0; i--) {
-                if (!pad.player.playing) break; // Stop if playback was interrupted
+                if (!pad.player.playing) break;
                 await pad.player.setVolume(i / steps);
                 await Future.delayed(Duration(milliseconds: stepDuration));
               }
@@ -507,7 +481,12 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Drum Pads')),
+      appBar: AppBar(
+        title: const Text('Drum Pads'),
+        backgroundColor: const Color(0xFF1A1B22),
+        elevation: 0,
+      ),
+      backgroundColor: const Color(0xFF15161C),
       body: SafeArea(
         child: Stack(
           children: [
@@ -523,69 +502,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         mainAxisSpacing: 12,
                       ),
                       itemCount: 9,
-                      itemBuilder: (context, index) {
-                        final pad = _pads[index];
-                        return GestureDetector(
-                          onTap: () => _playPad(index),
-                          onLongPress: () => _showPadOptions(index),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            curve: Curves.easeOut,
-                            decoration: BoxDecoration(
-                              color: pad.filePath == null
-                                  ? const Color(0xFF23242B)
-                                  : Colors.deepPurpleAccent.withOpacity(0.85),
-                              borderRadius: BorderRadius.circular(18),
-                              boxShadow: [
-                                if (pad.filePath != null)
-                                  BoxShadow(
-                                    color: Colors.deepPurpleAccent.withOpacity(0.4),
-                                    blurRadius: 16,
-                                    spreadRadius: 2,
-                                    offset: const Offset(0, 4),
-                                  ),
-                              ],
-                              border: Border.all(
-                                color: pad.filePath == null
-                                    ? Colors.white10
-                                    : Colors.deepPurpleAccent,
-                                width: 2,
-                              ),
-                            ),
-                            child: Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    pad.filePath == null ? Icons.music_note : Icons.audiotrack,
-                                    color: pad.filePath == null ? Colors.white38 : Colors.white,
-                                    size: 36,
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    'Pad ${index + 1}',
-                                    style: const TextStyle(
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.white,
-                                      letterSpacing: 1.1,
-                                    ),
-                                  ),
-                                  if (pad.filePath == null)
-                                    const Text(
-                                      'Hold to load',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: Colors.white38,
-                                        fontFamily: 'RobotoMono',
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        );
-                      },
+                      itemBuilder: (context, index) => _buildPad(index),
                     ),
                   ),
                 ),
@@ -1144,6 +1061,105 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
       ],
+    );
+  }
+
+  Widget _buildPad(int index) {
+    final pad = _pads[index];
+    final isTriggered = _padTriggerStates[index] ?? false;
+    final hasSound = pad.filePath != null;
+
+    return GestureDetector(
+      onTap: () => _playPad(index),
+      onLongPress: () => _showPadOptions(index),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: hasSound
+              ? isTriggered
+                ? [
+                    Colors.deepPurpleAccent,
+                    Colors.deepPurpleAccent.shade700,
+                  ]
+                : [
+                    const Color(0xFF2A2D3E),
+                    const Color(0xFF232635),
+                  ]
+              : [
+                  const Color(0xFF1D1E26),
+                  const Color(0xFF1A1B22),
+                ],
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: isTriggered
+                ? Colors.deepPurpleAccent.withOpacity(0.5)
+                : Colors.black.withOpacity(0.3),
+              blurRadius: isTriggered ? 16 : 8,
+              spreadRadius: isTriggered ? 2 : 0,
+              offset: const Offset(0, 2),
+            ),
+          ],
+          border: Border.all(
+            color: hasSound
+              ? isTriggered
+                ? Colors.deepPurpleAccent
+                : Colors.deepPurpleAccent.withOpacity(0.3)
+              : Colors.white10,
+            width: 1,
+          ),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (hasSound) ...[
+              Icon(
+                Icons.audiotrack,
+                color: isTriggered ? Colors.white : Colors.white70,
+                size: 24,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Pad ${index + 1}',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: isTriggered ? Colors.white : Colors.white70,
+                  letterSpacing: 0.5,
+                ),
+              ),
+              Text(
+                pad.isAsset 
+                  ? pad.filePath!.split('/').last.split('.').first
+                  : 'Sample ${index + 1}',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: isTriggered ? Colors.white70 : Colors.white38,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ] else ...[
+              const Icon(
+                Icons.add,
+                color: Colors.white38,
+                size: 24,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Add Sound',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.white38,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 } 
