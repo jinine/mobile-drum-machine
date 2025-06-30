@@ -7,7 +7,7 @@ class BpmController {
   bool _isRecording = false;
   bool _isOverdubbing = false;
   Timer? _bpmTimer;
-  final List<Function()> _onBeatCallbacks = [];
+  final List<Function(int)> _onBeatCallbacks = [];
   final List<List<int>> _recordedPattern = [];
   int _currentBeat = 0;
   int _beatsPerBar = 4;
@@ -56,13 +56,13 @@ class BpmController {
     }
   }
 
-  // Add callback for beat events
-  void addBeatCallback(Function() callback) {
+  // Add callback for beat events with beat number
+  void addBeatCallback(Function(int) callback) {
     _onBeatCallbacks.add(callback);
   }
 
   // Remove callback
-  void removeBeatCallback(Function() callback) {
+  void removeBeatCallback(Function(int) callback) {
     _onBeatCallbacks.remove(callback);
   }
 
@@ -150,7 +150,6 @@ class BpmController {
       // Play metronome if enabled
       if (_isMetronomeEnabled) {
         try {
-          // Reset position and play
           await _metronomePlayer.seek(Duration.zero);
           _metronomePlayer.play();
         } catch (e) {
@@ -160,13 +159,11 @@ class BpmController {
       
       // Play recorded pattern if available
       if (!_isRecording && _recordedPattern.isNotEmpty && _currentBeat < _recordedPattern.length) {
-        for (final padIndex in _recordedPattern[_currentBeat]) {
-          _onBeatCallbacks.forEach((callback) => callback());
+        // Notify callbacks with current beat for pattern playback
+        for (final callback in _onBeatCallbacks) {
+          callback(_currentBeat);
         }
       }
-      
-      // Notify all registered callbacks
-      _onBeatCallbacks.forEach((callback) => callback());
     });
   }
 
