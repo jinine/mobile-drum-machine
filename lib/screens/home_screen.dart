@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:just_audio/just_audio.dart';
 import '../widgets/waveform_display.dart';
+import '../services/bpm_controller.dart';
 import 'dart:async';
 
 class HomeScreen extends StatefulWidget {
@@ -59,13 +60,48 @@ class _HomeScreenState extends State<HomeScreen> {
       List.generate(9, (_) => _PadData(player: AudioPlayer()));
   int? _editingPadIndex;
   Map<int, _PadEditParams> _editParams = {};
+  final BpmController _bpmController = BpmController();
+  final TextEditingController _bpmTextController = TextEditingController(text: '120.0');
+  bool _isBeatActive = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _bpmController.addBeatCallback(_onBeat);
+  }
 
   @override
   void dispose() {
+    _bpmController.dispose();
+    _bpmTextController.dispose();
     for (final pad in _pads) {
       pad.dispose();
     }
     super.dispose();
+  }
+
+  void _onBeat() {
+    // Visual feedback for the beat
+    setState(() {
+      _isBeatActive = true;
+    });
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (mounted) {
+        setState(() {
+          _isBeatActive = false;
+        });
+      }
+    });
+
+    // Handle beat callback - this is where recorded patterns will be played
+    if (!_bpmController.isRecording && _bpmController.recordedPattern.isNotEmpty) {
+      final currentBeat = _bpmController.currentBeat;
+      if (currentBeat < _bpmController.recordedPattern.length) {
+        for (final padIndex in _bpmController.recordedPattern[currentBeat]) {
+          _playPad(padIndex);
+        }
+      }
+    }
   }
 
   Future<void> _pickFileForPad(int padIndex) async {
@@ -219,6 +255,9 @@ class _HomeScreenState extends State<HomeScreen> {
   void _playPad(int padIndex) async {
     final pad = _pads[padIndex];
     if (pad.filePath != null) {
+      // Record the pad hit if we're recording
+      _bpmController.recordPadHit(padIndex);
+
       final params = _editParams[padIndex];
 
       // If pad is currently looping, tapping it again will stop it.
@@ -363,205 +402,564 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  void _showRecordingOptions() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF23242B),
+      builder: (context) => SingleChildScrollView(
+        child: Container(
+          padding: EdgeInsets.fromLTRB(
+            16, 16, 16, 
+            MediaQuery.of(context).viewInsets.bottom + 16
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Title
+              const Padding(
+                padding: EdgeInsets.only(bottom: 16),
+                child: Text(
+                  'Recording Options',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              // Record options
+              const Padding(
+                padding: EdgeInsets.only(left: 16, bottom: 8),
+                child: Text(
+                  'RECORD MODE',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.fiber_manual_record, color: Colors.red),
+                title: const Text('New Recording', style: TextStyle(color: Colors.white)),
+                subtitle: const Text('Clear existing pattern and start new', style: TextStyle(color: Colors.white70)),
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _bpmController.startRecording(overdub: false);
+                  });
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.add_circle_outline, color: Colors.green),
+                title: const Text('Overdub', style: TextStyle(color: Colors.white)),
+                subtitle: const Text('Add to existing pattern', style: TextStyle(color: Colors.white70)),
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _bpmController.startRecording(overdub: true);
+                  });
+                },
+              ),
+              const Divider(color: Colors.white24),
+              // Clear options
+              const Padding(
+                padding: EdgeInsets.only(left: 16, top: 8, bottom: 8),
+                child: Text(
+                  'CLEAR OPTIONS',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline, color: Colors.red),
+                title: const Text('Clear All', style: TextStyle(color: Colors.white)),
+                subtitle: const Text('Delete entire pattern', style: TextStyle(color: Colors.white70)),
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _bpmController.clearRecording();
+                  });
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.clear_all, color: Colors.orange),
+                title: const Text('Clear Current Bar', style: TextStyle(color: Colors.white)),
+                subtitle: const Text('Delete only the current bar', style: TextStyle(color: Colors.white70)),
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _bpmController.clearBar(_bpmController.currentBar);
+                  });
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Drum Pads')),
-      body: Stack(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Column(
               children: [
                 Expanded(
-                  child: GridView.builder(
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 3,
-                      crossAxisSpacing: 12,
-                      mainAxisSpacing: 12,
-                    ),
-                    itemCount: 9,
-                    itemBuilder: (context, index) {
-                      final pad = _pads[index];
-                      return GestureDetector(
-                        onTap: () => _playPad(index),
-                        onLongPress: () => _showPadOptions(index),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 200),
-                          curve: Curves.easeOut,
-                          decoration: BoxDecoration(
-                            color: pad.filePath == null
-                                ? const Color(0xFF23242B)
-                                : Colors.deepPurpleAccent.withOpacity(0.85),
-                            borderRadius: BorderRadius.circular(18),
-                            boxShadow: [
-                              if (pad.filePath != null)
-                                BoxShadow(
-                                  color: Colors.deepPurpleAccent.withOpacity(0.4),
-                                  blurRadius: 16,
-                                  spreadRadius: 2,
-                                  offset: const Offset(0, 4),
-                                ),
-                            ],
-                            border: Border.all(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: GridView.builder(
+                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 3,
+                        crossAxisSpacing: 12,
+                        mainAxisSpacing: 12,
+                      ),
+                      itemCount: 9,
+                      itemBuilder: (context, index) {
+                        final pad = _pads[index];
+                        return GestureDetector(
+                          onTap: () => _playPad(index),
+                          onLongPress: () => _showPadOptions(index),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            curve: Curves.easeOut,
+                            decoration: BoxDecoration(
                               color: pad.filePath == null
-                                  ? Colors.white10
-                                  : Colors.deepPurpleAccent,
-                              width: 2,
-                            ),
-                          ),
-                          child: Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  pad.filePath == null ? Icons.music_note : Icons.audiotrack,
-                                  color: pad.filePath == null ? Colors.white38 : Colors.white,
-                                  size: 36,
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  'Pad ${index + 1}',
-                                  style: const TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
-                                    letterSpacing: 1.1,
+                                  ? const Color(0xFF23242B)
+                                  : Colors.deepPurpleAccent.withOpacity(0.85),
+                              borderRadius: BorderRadius.circular(18),
+                              boxShadow: [
+                                if (pad.filePath != null)
+                                  BoxShadow(
+                                    color: Colors.deepPurpleAccent.withOpacity(0.4),
+                                    blurRadius: 16,
+                                    spreadRadius: 2,
+                                    offset: const Offset(0, 4),
                                   ),
-                                ),
-                                if (pad.filePath == null)
-                                  const Text(
-                                    'Hold to load',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: Colors.white38,
-                                      fontFamily: 'RobotoMono',
+                              ],
+                              border: Border.all(
+                                color: pad.filePath == null
+                                    ? Colors.white10
+                                    : Colors.deepPurpleAccent,
+                                width: 2,
+                              ),
+                            ),
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    pad.filePath == null ? Icons.music_note : Icons.audiotrack,
+                                    color: pad.filePath == null ? Colors.white38 : Colors.white,
+                                    size: 36,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'Pad ${index + 1}',
+                                    style: const TextStyle(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                      letterSpacing: 1.1,
                                     ),
                                   ),
+                                  if (pad.filePath == null)
+                                    const Text(
+                                      'Hold to load',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.white38,
+                                        fontFamily: 'RobotoMono',
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                _buildTransportControls(),
+              ],
+            ),
+            if (_editingPadIndex != null && _pads[_editingPadIndex!].filePath != null)
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeInOut,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: MediaQuery.of(context).size.height * 0.6,
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween(begin: 0.0, end: 1.0),
+                  duration: const Duration(milliseconds: 300),
+                  builder: (context, value, child) {
+                    return Transform.translate(
+                      offset: Offset(0, (1 - value) * 100),
+                      child: Opacity(
+                        opacity: value,
+                        child: child,
+                      ),
+                    );
+                  },
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF23242B),
+                      borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.3),
+                          blurRadius: 20,
+                          spreadRadius: 5,
+                          offset: const Offset(0, -2),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Handle bar for dragging
+                        Center(
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 8),
+                            width: 40,
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: Colors.white24,
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                'Editing Pad ${_editingPadIndex! + 1}',
+                                style: const TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.close, color: Colors.white54),
+                                onPressed: () {
+                                  setState(() {
+                                    _editingPadIndex = null;
+                                  });
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                        Expanded(
+                          child: SingleChildScrollView(
+                            padding: const EdgeInsets.all(16.0),
+                            physics: const BouncingScrollPhysics(),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                WaveformDisplay(
+                                  filePath: _pads[_editingPadIndex!].filePath,
+                                  startTime: _editParams[_editingPadIndex!]?.startTime,
+                                  endTime: _editParams[_editingPadIndex!]?.endTime,
+                                  totalDuration: _editParams[_editingPadIndex!]?.totalDuration,
+                                  onStartTimeChanged: (time) {
+                                    setState(() {
+                                      final params = _editParams[_editingPadIndex!]!;
+                                      params.startTime = time;
+                                      params.updatePercentagesFromTimes();
+                                    });
+                                  },
+                                  onEndTimeChanged: (time) {
+                                    setState(() {
+                                      final params = _editParams[_editingPadIndex!]!;
+                                      params.endTime = time;
+                                      params.updatePercentagesFromTimes();
+                                    });
+                                  },
+                                ),
+                                const SizedBox(height: 16),
+                                _buildEditingControls(_editingPadIndex!),
+                                // Add some padding at the bottom to ensure everything is visible
+                                const SizedBox(height: 32),
                               ],
                             ),
                           ),
                         ),
-                      );
-                    },
+                      ],
+                    ),
                   ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTransportControls() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+      decoration: BoxDecoration(
+        color: const Color(0xFF23242B),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.2),
+            blurRadius: 8,
+            offset: const Offset(0, -2),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Bar counter and transport buttons row
+          SizedBox(
+            height: 48,
+            child: Row(
+              children: [
+                // Bar/Beat counter
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.white10,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Bar ${_bpmController.currentBar + 1}.',
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontFamily: 'RobotoMono',
+                          fontSize: 13,
+                        ),
+                      ),
+                      Text(
+                        '${_bpmController.beatInBar + 1}',
+                        style: TextStyle(
+                          color: _isBeatActive ? Colors.deepPurpleAccent : Colors.white,
+                          fontFamily: 'RobotoMono',
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                // Beat indicator
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _isBeatActive ? Colors.deepPurpleAccent : Colors.white24,
+                  ),
+                ),
+                const Spacer(),
+                // Transport Controls
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Play button
+                    IconButton(
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                      icon: Icon(
+                        _bpmController.isPlaying ? Icons.stop : Icons.play_arrow,
+                        color: Colors.white,
+                        size: 28,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          if (_bpmController.isPlaying) {
+                            _bpmController.stop();
+                          } else {
+                            _bpmController.start();
+                          }
+                        });
+                      },
+                    ),
+                    const SizedBox(width: 12),
+                    // Record button
+                    IconButton(
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                      icon: Icon(
+                        _bpmController.isRecording 
+                          ? Icons.stop_circle 
+                          : Icons.fiber_manual_record,
+                        color: _bpmController.isRecording 
+                          ? Colors.red 
+                          : _bpmController.isOverdubbing 
+                            ? Colors.green 
+                            : Colors.white,
+                        size: 28,
+                      ),
+                      onPressed: () {
+                        if (_bpmController.isRecording) {
+                          setState(() {
+                            _bpmController.stopRecording();
+                          });
+                        } else {
+                          _showRecordingOptions();
+                        }
+                      },
+                    ),
+                    const SizedBox(width: 12),
+                    // Metronome button
+                    IconButton(
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                      icon: Icon(
+                        Icons.music_note,
+                        color: _bpmController.isMetronomeEnabled 
+                          ? Colors.deepPurpleAccent 
+                          : Colors.white54,
+                        size: 24,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          _bpmController.toggleMetronome();
+                        });
+                      },
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
-          if (_editingPadIndex != null && _pads[_editingPadIndex!].filePath != null)
-            AnimatedPositioned(
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeInOut,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              height: MediaQuery.of(context).size.height * 0.6,
-              child: TweenAnimationBuilder<double>(
-                tween: Tween(begin: 0.0, end: 1.0),
-                duration: const Duration(milliseconds: 300),
-                builder: (context, value, child) {
-                  return Transform.translate(
-                    offset: Offset(0, (1 - value) * 100),
-                    child: Opacity(
-                      opacity: value,
-                      child: child,
+          const SizedBox(height: 8),
+          // Pattern length and BPM controls
+          Row(
+            children: [
+              // Pattern length controls
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.white10,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Bars:',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 13,
+                      ),
                     ),
-                  );
-                },
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF23242B),
-                    borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.3),
-                        blurRadius: 20,
-                        spreadRadius: 5,
-                        offset: const Offset(0, -2),
+                    const SizedBox(width: 4),
+                    DropdownButton<int>(
+                      value: _bpmController.totalBars,
+                      dropdownColor: const Color(0xFF2D2E36),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
                       ),
-                    ],
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Handle bar for dragging
-                      Center(
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(vertical: 8),
-                          width: 40,
-                          height: 4,
-                          decoration: BoxDecoration(
-                            color: Colors.white24,
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              'Editing Pad ${_editingPadIndex! + 1}',
-                              style: const TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
-                              ),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.close, color: Colors.white54),
-                              onPressed: () {
-                                setState(() {
-                                  _editingPadIndex = null;
-                                });
-                              },
-                            ),
-                          ],
-                        ),
-                      ),
-                      Expanded(
-                        child: SingleChildScrollView(
-                          padding: const EdgeInsets.all(16.0),
-                          physics: const BouncingScrollPhysics(),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              WaveformDisplay(
-                                filePath: _pads[_editingPadIndex!].filePath,
-                                startTime: _editParams[_editingPadIndex!]?.startTime,
-                                endTime: _editParams[_editingPadIndex!]?.endTime,
-                                totalDuration: _editParams[_editingPadIndex!]?.totalDuration,
-                                onStartTimeChanged: (time) {
-                                  setState(() {
-                                    final params = _editParams[_editingPadIndex!]!;
-                                    params.startTime = time;
-                                    params.updatePercentagesFromTimes();
-                                  });
-                                },
-                                onEndTimeChanged: (time) {
-                                  setState(() {
-                                    final params = _editParams[_editingPadIndex!]!;
-                                    params.endTime = time;
-                                    params.updatePercentagesFromTimes();
-                                  });
-                                },
-                              ),
-                              const SizedBox(height: 16),
-                              _buildEditingControls(_editingPadIndex!),
-                              // Add some padding at the bottom to ensure everything is visible
-                              const SizedBox(height: 32),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+                      underline: Container(),
+                      items: [1, 2, 4, 8, 16].map((int value) {
+                        return DropdownMenuItem<int>(
+                          value: value,
+                          child: Text(value.toString()),
+                        );
+                      }).toList(),
+                      onChanged: (int? newValue) {
+                        if (newValue != null) {
+                          setState(() {
+                            _bpmController.setPatternLength(newValue);
+                          });
+                        }
+                      },
+                    ),
+                  ],
                 ),
               ),
-            ),
+              const SizedBox(width: 12),
+              // BPM controls
+              Expanded(
+                child: Row(
+                  children: [
+                    const Text(
+                      'BPM',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 56,
+                      height: 32,
+                      child: TextField(
+                        controller: _bpmTextController,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                        ),
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          contentPadding: EdgeInsets.symmetric(horizontal: 6, vertical: 0),
+                          border: OutlineInputBorder(),
+                          enabledBorder: OutlineInputBorder(
+                            borderSide: BorderSide(color: Colors.white24),
+                          ),
+                        ),
+                        onChanged: (value) {
+                          final bpm = double.tryParse(value);
+                          if (bpm != null) {
+                            _bpmController.setBpm(bpm);
+                          }
+                        },
+                      ),
+                    ),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          activeTrackColor: Colors.deepPurpleAccent,
+                          inactiveTrackColor: Colors.white24,
+                          thumbColor: Colors.deepPurpleAccent,
+                          overlayColor: Colors.deepPurpleAccent.withOpacity(0.3),
+                          trackHeight: 4.0,
+                        ),
+                        child: Slider(
+                          value: _bpmController.bpm,
+                          min: 40,
+                          max: 240,
+                          divisions: 200,
+                          label: _bpmController.bpm.toStringAsFixed(1),
+                          onChanged: (value) {
+                            setState(() {
+                              _bpmController.setBpm(value);
+                              _bpmTextController.text = value.toStringAsFixed(1);
+                            });
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );

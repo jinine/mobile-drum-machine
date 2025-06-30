@@ -93,3 +93,4 @@ flutter:
 
   assets:
     - assets/samples/
+    - assets/samples/metronome.mp3
