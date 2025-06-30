@@ -1,9 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:audio_waveforms/audio_waveforms.dart';
+import 'dart:async';
 
 class WaveformDisplay extends StatefulWidget {
   final String? filePath;
-  const WaveformDisplay({Key? key, this.filePath}) : super(key: key);
+  final Duration? startTime;
+  final Duration? endTime;
+  final Duration? totalDuration;
+  final ValueChanged<Duration>? onStartTimeChanged;
+  final ValueChanged<Duration>? onEndTimeChanged;
+
+  const WaveformDisplay({
+    Key? key, 
+    this.filePath,
+    this.startTime,
+    this.endTime,
+    this.totalDuration,
+    this.onStartTimeChanged,
+    this.onEndTimeChanged,
+  }) : super(key: key);
 
   @override
   State<WaveformDisplay> createState() => _WaveformDisplayState();
@@ -13,12 +28,26 @@ class _WaveformDisplayState extends State<WaveformDisplay> {
   late final PlayerController _controller;
   bool _loading = false;
   bool _loaded = false;
+  Duration _currentPosition = Duration.zero;
+  StreamSubscription? _positionSubscription;
 
   @override
   void initState() {
     super.initState();
     _controller = PlayerController();
     _loadWaveform();
+    _startPositionListener();
+  }
+
+  void _startPositionListener() {
+    _positionSubscription?.cancel();
+    _positionSubscription = _controller.onCurrentDurationChanged.listen((durationInMs) {
+      if (mounted) {
+        setState(() {
+          _currentPosition = Duration(milliseconds: durationInMs);
+        });
+      }
+    });
   }
 
   @override
@@ -56,6 +85,7 @@ class _WaveformDisplayState extends State<WaveformDisplay> {
 
   @override
   void dispose() {
+    _positionSubscription?.cancel();
     _controller.dispose();
     super.dispose();
   }
@@ -83,15 +113,45 @@ class _WaveformDisplayState extends State<WaveformDisplay> {
         child: const Center(child: Text('Failed to load waveform')),
       );
     }
-    return Container(
-      color: Colors.black12,
-      height: 100,
-      child: AudioFileWaveforms(
-        size: const Size(double.infinity, 100),
-        playerController: _controller,
-        waveformType: WaveformType.fitWidth,
-        enableSeekGesture: true,
-      ),
+
+    return Stack(
+      children: [
+        Container(
+          color: Colors.black12,
+          height: 100,
+          child: AudioFileWaveforms(
+            size: const Size(double.infinity, 100),
+            playerController: _controller,
+            waveformType: WaveformType.fitWidth,
+            enableSeekGesture: true,
+            playerWaveStyle: const PlayerWaveStyle(
+              seekLineColor: Colors.deepPurpleAccent,
+              seekLineThickness: 2,
+              showSeekLine: true,
+            ),
+          ),
+        ),
+        if (widget.startTime != null && widget.totalDuration != null)
+          Positioned(
+            left: (widget.startTime!.inMilliseconds / widget.totalDuration!.inMilliseconds) * MediaQuery.of(context).size.width,
+            top: 0,
+            bottom: 0,
+            child: Container(
+              width: 2,
+              color: Colors.greenAccent.withOpacity(0.8),
+            ),
+          ),
+        if (widget.endTime != null && widget.totalDuration != null)
+          Positioned(
+            left: (widget.endTime!.inMilliseconds / widget.totalDuration!.inMilliseconds) * MediaQuery.of(context).size.width,
+            top: 0,
+            bottom: 0,
+            child: Container(
+              width: 2,
+              color: Colors.redAccent.withOpacity(0.8),
+            ),
+          ),
+      ],
     );
   }
 } 

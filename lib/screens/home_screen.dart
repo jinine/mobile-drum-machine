@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:just_audio/just_audio.dart';
 import '../widgets/waveform_display.dart';
+import 'dart:async';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
@@ -26,12 +27,31 @@ class _PadData {
 
 class _PadEditParams {
   double start = 0.0;
-  double end = 1.0; // 1.0 means 100% of the sample
+  double end = 1.0;
+  Duration? totalDuration;  // Store the total duration of the sample
+  Duration startTime = Duration.zero;  // Actual start time in Duration
+  Duration endTime = Duration.zero;    // Actual end time in Duration
   bool reverse = false;
   double speed = 1.0;
   double fadeIn = 0.0;
   double fadeOut = 0.0;
   bool loop = false;
+
+  // Convert percentage to Duration
+  void updateTimesFromPercentages() {
+    if (totalDuration != null) {
+      startTime = totalDuration! * start;
+      endTime = totalDuration! * end;
+    }
+  }
+
+  // Convert Duration to percentage
+  void updatePercentagesFromTimes() {
+    if (totalDuration != null && totalDuration!.inMilliseconds > 0) {
+      start = startTime.inMilliseconds / totalDuration!.inMilliseconds;
+      end = endTime.inMilliseconds / totalDuration!.inMilliseconds;
+    }
+  }
 }
 
 class _HomeScreenState extends State<HomeScreen> {
@@ -76,18 +96,21 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       // Pre-load the audio data. This is crucial for low-latency playback.
-      // The duration returned here can be useful, but we don't need it for now.
       await newPlayer.setAudioSource(source, preload: true);
+      
+      // Get the duration and initialize edit parameters
+      final duration = await newPlayer.duration;
+      final params = _PadEditParams()
+        ..totalDuration = duration
+        ..endTime = duration ?? Duration.zero;
 
       setState(() {
         // Replace the old pad data with new data including the new player
-        _pads[padIndex] =
-            _PadData(player: newPlayer, filePath: path, isAsset: isAsset);
+        _pads[padIndex] = _PadData(player: newPlayer, filePath: path, isAsset: isAsset);
+        _editParams[padIndex] = params;
       });
     } catch (e) {
-      // Handle potential errors during loading
       print("Error loading audio source: $e");
-      // You might want to show a dialog to the user here
     }
   }
 
@@ -208,65 +231,135 @@ class _HomeScreenState extends State<HomeScreen> {
         await pad.player.stop();
       }
 
-      // Apply loop mode
-      if (params != null) {
-        await pad.player.setLoopMode(params.loop ? LoopMode.one : LoopMode.off);
-      } else {
-        await pad.player.setLoopMode(LoopMode.off);
-      }
-
-      // Apply speed (pitch/time-stretch)
-      if (params != null) {
-        await pad.player.setSpeed(params.speed);
-      } else {
-        await pad.player.setSpeed(1.0);
-      }
-      // Apply trim (start/end)
-      Duration? duration = pad.player.duration;
-      Duration start = Duration.zero;
-      Duration? end;
-      if (params != null && duration != null) {
-        start = duration * params.start;
-        end = duration * params.end;
-        // Set the clip for the player
-        await pad.player.setClip(start: start, end: end);
-      } else {
-        // Clear any previous clipping
-        await pad.player.setClip();
-      }
-
-      await pad.player.seek(start);
-      pad.player.play();
-
-      // Handle fade in/out (approximate, not sample-accurate)
-      // TODO: Re-implement fade logic correctly. The 'duration' parameter for setVolume was incorrect and caused build errors.
-      /*
-      if (params != null && (params.fadeIn > 0.0 || params.fadeOut > 0.0)) {
-        // Reset volume to 1.0 before applying fades
-        pad.player.setVolume(1.0);
-        
-        if (params.fadeIn > 0.0) {
-          pad.player.setVolume(0.0);
-          pad.player.setVolume(1.0,
-              duration: Duration(milliseconds: (params.fadeIn * 1000).toInt()));
+      try {
+        // Create appropriate AudioSource based on parameters
+        AudioSource source;
+        if (pad.isAsset) {
+          source = AudioSource.asset(pad.filePath!);
+        } else {
+          source = AudioSource.file(pad.filePath!);
         }
 
-        // Fade out is complex with loops. This logic is best for non-looping sounds.
-        if (params.fadeOut > 0.0 && end != null && !params.loop) {
-          final fadeOutDuration = Duration(milliseconds: (params.fadeOut * 1000).toInt());
-          final playbackDuration = end - start;
+        // Set the audio source
+        await pad.player.setAudioSource(source);
 
-          if (playbackDuration > fadeOutDuration) {
-            Future.delayed(playbackDuration - fadeOutDuration, () {
-              if (pad.player.playing) {
-                pad.player.setVolume(1.0); // Ensure volume is 1 before starting fade
-                pad.player.setVolume(0.0, duration: fadeOutDuration);
+        // Apply loop mode
+        await pad.player.setLoopMode(params?.loop == true ? LoopMode.one : LoopMode.off);
+
+        // Apply speed (pitch/time-stretch)
+        if (params != null) {
+          await pad.player.setSpeed(params.speed);
+        } else {
+          await pad.player.setSpeed(1.0);
+        }
+
+        // Apply trim (start/end)
+        if (params != null) {
+          await pad.player.setClip(
+            start: params.startTime,
+            end: params.endTime,
+          );
+
+          // For reverse playback, seek to end. For normal playback, seek to start
+          if (params.reverse) {
+            await pad.player.seek(params.endTime);
+          } else {
+            await pad.player.seek(params.startTime);
+          }
+        } else {
+          await pad.player.setClip();
+          await pad.player.seek(Duration.zero);
+        }
+
+        // Reset volume to 1.0 before starting
+        await pad.player.setVolume(1.0);
+
+        // Start playback
+        if (params?.reverse == true) {
+          // TODO: Implement proper reverse playback
+          // DISCLAIMER: Current reverse implementation is a temporary solution that produces
+          // choppy audio and artifacts. This is NOT a proper reverse playback implementation.
+          // A proper implementation would require:
+          // 1. Sample-level audio manipulation
+          // 2. Buffer reversal before playback
+          // 3. Native audio processing for real-time sample reversal
+          // 4. Proper handling of audio codec specifics
+          //
+          // This will be replaced with a proper implementation using native audio processing.
+          // For now, this is just a visual demonstration and should not be used in production.
+          
+          // Current hacky implementation - produces choppy audio:
+          final currentParams = params!; // Cache the non-null params
+          final stepSize = const Duration(milliseconds: 20); // 20ms steps for "playback"
+          final timer = Timer.periodic(stepSize, (timer) async {
+            if (!pad.player.playing) {
+              timer.cancel();
+              return;
+            }
+
+            final position = await pad.player.position;
+            if (position <= currentParams.startTime) {
+              if (currentParams.loop) {
+                // If looping, jump back to end
+                await pad.player.seek(currentParams.endTime);
+              } else {
+                // If not looping, stop playback
+                timer.cancel();
+                await pad.player.stop();
+              }
+            } else {
+              // Move backwards by stepSize - this produces choppy audio
+              await pad.player.seek(position - stepSize);
+            }
+          });
+
+          // Start the audio but immediately pause it
+          // This ensures the audio engine is ready but we control the position
+          await pad.player.play();
+          await pad.player.pause();
+        } else {
+          pad.player.play();
+        }
+
+        // Handle fade in/out
+        if (params != null && (params.fadeIn > 0.0 || params.fadeOut > 0.0)) {
+          if (params.fadeIn > 0.0) {
+            // Start with volume 0 and fade in
+            await pad.player.setVolume(0.0);
+            
+            // Create a smooth fade in effect
+            const steps = 50; // Number of steps for smooth fade
+            final stepDuration = (params.fadeIn * 1000 / steps).round();
+            for (var i = 1; i <= steps; i++) {
+              if (!pad.player.playing) break; // Stop if playback was interrupted
+              await pad.player.setVolume(i / steps);
+              await Future.delayed(Duration(milliseconds: stepDuration));
+            }
+          }
+
+          if (params.fadeOut > 0.0 && !params.loop) {
+            // Calculate when to start fade out
+            final totalDuration = params.endTime - params.startTime;
+            final fadeOutStart = totalDuration - Duration(milliseconds: (params.fadeOut * 1000).round());
+            
+            // Wait until it's time to fade out
+            Future.delayed(fadeOutStart, () async {
+              if (!pad.player.playing) return; // Don't fade if not playing
+              
+              // Create a smooth fade out effect
+              const steps = 50; // Number of steps for smooth fade
+              final stepDuration = (params.fadeOut * 1000 / steps).round();
+              for (var i = steps - 1; i >= 0; i--) {
+                if (!pad.player.playing) break; // Stop if playback was interrupted
+                await pad.player.setVolume(i / steps);
+                await Future.delayed(Duration(milliseconds: stepDuration));
               }
             });
           }
         }
+      } catch (e) {
+        print('Error playing pad: $e');
       }
-      */
     }
   }
 
@@ -274,160 +367,303 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Drum Pads')),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            Expanded(
-              child: GridView.builder(
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 3,
-                  crossAxisSpacing: 12,
-                  mainAxisSpacing: 12,
-                ),
-                itemCount: 9,
-                itemBuilder: (context, index) {
-                  final pad = _pads[index];
-                  return GestureDetector(
-                    onTap: () => _playPad(index),
-                    onLongPress: () => _showPadOptions(index),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 200),
-                      curve: Curves.easeOut,
-                      decoration: BoxDecoration(
-                        color: pad.filePath == null
-                            ? const Color(0xFF23242B)
-                            : Colors.deepPurpleAccent.withOpacity(0.85),
-                        borderRadius: BorderRadius.circular(18),
-                        boxShadow: [
-                          if (pad.filePath != null)
-                            BoxShadow(
-                              color: Colors.deepPurpleAccent.withOpacity(0.4),
-                              blurRadius: 16,
-                              spreadRadius: 2,
-                              offset: const Offset(0, 4),
+      body: Stack(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              children: [
+                Expanded(
+                  child: GridView.builder(
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 12,
+                      mainAxisSpacing: 12,
+                    ),
+                    itemCount: 9,
+                    itemBuilder: (context, index) {
+                      final pad = _pads[index];
+                      return GestureDetector(
+                        onTap: () => _playPad(index),
+                        onLongPress: () => _showPadOptions(index),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          curve: Curves.easeOut,
+                          decoration: BoxDecoration(
+                            color: pad.filePath == null
+                                ? const Color(0xFF23242B)
+                                : Colors.deepPurpleAccent.withOpacity(0.85),
+                            borderRadius: BorderRadius.circular(18),
+                            boxShadow: [
+                              if (pad.filePath != null)
+                                BoxShadow(
+                                  color: Colors.deepPurpleAccent.withOpacity(0.4),
+                                  blurRadius: 16,
+                                  spreadRadius: 2,
+                                  offset: const Offset(0, 4),
+                                ),
+                            ],
+                            border: Border.all(
+                              color: pad.filePath == null
+                                  ? Colors.white10
+                                  : Colors.deepPurpleAccent,
+                              width: 2,
                             ),
-                        ],
-                        border: Border.all(
-                          color: pad.filePath == null
-                              ? Colors.white10
-                              : Colors.deepPurpleAccent,
-                          width: 2,
+                          ),
+                          child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  pad.filePath == null ? Icons.music_note : Icons.audiotrack,
+                                  color: pad.filePath == null ? Colors.white38 : Colors.white,
+                                  size: 36,
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  'Pad ${index + 1}',
+                                  style: const TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                    letterSpacing: 1.1,
+                                  ),
+                                ),
+                                if (pad.filePath == null)
+                                  const Text(
+                                    'Hold to load',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.white38,
+                                      fontFamily: 'RobotoMono',
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (_editingPadIndex != null && _pads[_editingPadIndex!].filePath != null)
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              height: MediaQuery.of(context).size.height * 0.6,
+              child: TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0.0, end: 1.0),
+                duration: const Duration(milliseconds: 300),
+                builder: (context, value, child) {
+                  return Transform.translate(
+                    offset: Offset(0, (1 - value) * 100),
+                    child: Opacity(
+                      opacity: value,
+                      child: child,
+                    ),
+                  );
+                },
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF23242B),
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.3),
+                        blurRadius: 20,
+                        spreadRadius: 5,
+                        offset: const Offset(0, -2),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Handle bar for dragging
+                      Center(
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(vertical: 8),
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: Colors.white24,
+                            borderRadius: BorderRadius.circular(2),
+                          ),
                         ),
                       ),
-                      child: Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Icon(
-                              pad.filePath == null ? Icons.music_note : Icons.audiotrack,
-                              color: pad.filePath == null ? Colors.white38 : Colors.white,
-                              size: 36,
-                            ),
-                            const SizedBox(height: 8),
                             Text(
-                              'Pad ${index + 1}',
+                              'Editing Pad ${_editingPadIndex! + 1}',
                               style: const TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.bold,
                                 color: Colors.white,
-                                letterSpacing: 1.1,
                               ),
                             ),
-                            if (pad.filePath == null)
-                              const Text(
-                                'Hold to load',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.white38,
-                                  fontFamily: 'RobotoMono',
-                                ),
-                              ),
+                            IconButton(
+                              icon: const Icon(Icons.close, color: Colors.white54),
+                              onPressed: () {
+                                setState(() {
+                                  _editingPadIndex = null;
+                                });
+                              },
+                            ),
                           ],
                         ),
                       ),
-                    ),
-                  );
-                },
-              ),
-            ),
-            if (_editingPadIndex != null && _pads[_editingPadIndex!].filePath != null)
-              Container(
-                margin: const EdgeInsets.only(top: 16),
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF23242B),
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.deepPurpleAccent.withOpacity(0.2),
-                      blurRadius: 12,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          'Editing Pad ${_editingPadIndex! + 1}',
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
+                      Expanded(
+                        child: SingleChildScrollView(
+                          padding: const EdgeInsets.all(16.0),
+                          physics: const BouncingScrollPhysics(),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              WaveformDisplay(
+                                filePath: _pads[_editingPadIndex!].filePath,
+                                startTime: _editParams[_editingPadIndex!]?.startTime,
+                                endTime: _editParams[_editingPadIndex!]?.endTime,
+                                totalDuration: _editParams[_editingPadIndex!]?.totalDuration,
+                                onStartTimeChanged: (time) {
+                                  setState(() {
+                                    final params = _editParams[_editingPadIndex!]!;
+                                    params.startTime = time;
+                                    params.updatePercentagesFromTimes();
+                                  });
+                                },
+                                onEndTimeChanged: (time) {
+                                  setState(() {
+                                    final params = _editParams[_editingPadIndex!]!;
+                                    params.endTime = time;
+                                    params.updatePercentagesFromTimes();
+                                  });
+                                },
+                              ),
+                              const SizedBox(height: 16),
+                              _buildEditingControls(_editingPadIndex!),
+                              // Add some padding at the bottom to ensure everything is visible
+                              const SizedBox(height: 32),
+                            ],
                           ),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.close, color: Colors.white54),
-                          onPressed: () {
-                            setState(() {
-                              _editingPadIndex = null;
-                            });
-                          },
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    WaveformDisplay(filePath: _pads[_editingPadIndex!].filePath),
-                    const SizedBox(height: 16),
-                    _buildEditingControls(_editingPadIndex!),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
-          ],
-        ),
+            ),
+        ],
       ),
     );
   }
 
   Widget _buildEditingControls(int padIndex) {
     final params = _editParams[padIndex]!;
+    final duration = params.totalDuration;
+    
+    String formatDuration(Duration d) {
+      final minutes = d.inMinutes;
+      final seconds = (d.inMilliseconds / 1000) % 60;
+      final milliseconds = d.inMilliseconds % 1000;
+      return '${minutes.toString().padLeft(2, '0')}:${seconds.toStringAsFixed(3).padLeft(6, '0')}';
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (duration != null) Padding(
+          padding: const EdgeInsets.only(bottom: 8.0),
+          child: Text(
+            'Total Duration: ${formatDuration(duration)}',
+            style: const TextStyle(color: Colors.white70),
+          ),
+        ),
         Row(
           children: [
             const Text('Trim:', style: TextStyle(color: Colors.white70)),
             Expanded(
-              child: RangeSlider(
-                values: RangeValues(params.start, params.end),
-                min: 0.0,
-                max: 1.0,
-                divisions: 100,
-                labels: RangeLabels(
-                  (params.start * 100).toStringAsFixed(0) + '%',
-                  (params.end * 100).toStringAsFixed(0) + '%',
-                ),
-                onChanged: (values) {
-                  setState(() {
-                    params.start = values.start;
-                    params.end = values.end;
-                  });
-                },
+              child: Column(
+                children: [
+                  RangeSlider(
+                    values: RangeValues(params.start, params.end),
+                    min: 0.0,
+                    max: 1.0,
+                    divisions: 1000, // Increased precision
+                    labels: RangeLabels(
+                      formatDuration(params.startTime),
+                      formatDuration(params.endTime),
+                    ),
+                    onChanged: (values) {
+                      setState(() {
+                        params.start = values.start;
+                        params.end = values.end;
+                        params.updateTimesFromPercentages();
+                      });
+                    },
+                  ),
+                  // Add precise time input fields
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          style: const TextStyle(color: Colors.white),
+                          decoration: const InputDecoration(
+                            labelText: 'Start (ms)',
+                            labelStyle: TextStyle(color: Colors.white70),
+                            enabledBorder: UnderlineInputBorder(
+                              borderSide: BorderSide(color: Colors.white30),
+                            ),
+                          ),
+                          keyboardType: TextInputType.number,
+                          initialValue: params.startTime.inMilliseconds.toString(),
+                          onChanged: (value) {
+                            final ms = int.tryParse(value);
+                            if (ms != null && duration != null) {
+                              setState(() {
+                                params.startTime = Duration(milliseconds: ms.clamp(0, duration.inMilliseconds));
+                                params.updatePercentagesFromTimes();
+                              });
+                            }
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: TextFormField(
+                          style: const TextStyle(color: Colors.white),
+                          decoration: const InputDecoration(
+                            labelText: 'End (ms)',
+                            labelStyle: TextStyle(color: Colors.white70),
+                            enabledBorder: UnderlineInputBorder(
+                              borderSide: BorderSide(color: Colors.white30),
+                            ),
+                          ),
+                          keyboardType: TextInputType.number,
+                          initialValue: params.endTime.inMilliseconds.toString(),
+                          onChanged: (value) {
+                            final ms = int.tryParse(value);
+                            if (ms != null && duration != null) {
+                              setState(() {
+                                params.endTime = Duration(milliseconds: ms.clamp(0, duration.inMilliseconds));
+                                params.updatePercentagesFromTimes();
+                              });
+                            }
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
           ],
